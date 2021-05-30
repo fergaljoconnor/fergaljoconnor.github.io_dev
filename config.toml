@@ -21,11 +21,15 @@ pygmentsCodefencesGuessSyntax = true
 [params]
 title = "Fergal O'Connor"
 author = "Fergal O'Connor"
+
 description = """Data Engineer. Rust Enthusiast.
 Perpetual Tinkerer."""
+
 profilePicture = "images/profile.jpg"
-displayMode = "dark"
+
+# Size Ratio of Content To Sidebar
 contentratio = 0.7
+
 # Read More Links On
 readMore = true
 
