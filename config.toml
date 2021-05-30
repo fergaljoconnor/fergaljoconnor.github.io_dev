@@ -1,0 +1,58 @@
+baseURL = "https://fergaljoconnor.github.io/"
+languageCode = "en"
+DefaultContentLanguage = "en"
+title = "Fergal's Homepage"
+theme = "anatole"
+summarylength = 10
+enableEmoji = true
+enableRobotsTXT = true
+
+# Enable Disqus
+#disqusShortname = ""
+
+# Google Analytics
+#googleAnalytics = "UA-123-45"
+
+# Syntax highlighting
+pygmentsUseClasses = true
+pygmentsCodeFences = true
+pygmentsCodefencesGuessSyntax = true
+
+[params]
+title = "Fergal O'Connor"
+author = "Fergal O'Connor"
+description = """Data Engineer. Rust Enthusiast.
+Perpetual Tinkerer."""
+profilePicture = "images/profile.jpg"
+displayMode = "dark"
+contentratio = 0.7
+# Read More Links On
+readMore = true
+
+[menu]
+
+  [[menu.main]]
+  name = "Home"
+  identifier = "home"
+  weight = 100
+  url = "/"
+
+  [[menu.main]]
+  name = "Posts"
+  weight = 200
+  identifier = "posts"
+  url = "/post/"
+
+  [[menu.main]]
+  name = "About"
+  weight = 300
+  identifier = "about"
+  url = "/about/"
+
+  [[menu.main]]
+  name = "Github"
+  identifier = "github"
+  weight = 100
+  url = "https://github.com/fergaljoconnor"
+
+
