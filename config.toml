@@ -33,6 +33,8 @@ contentratio = 0.7
 # Read More Links On
 readMore = true
 
+displayMode = "light"
+
 [menu]
 
   [[menu.main]]
