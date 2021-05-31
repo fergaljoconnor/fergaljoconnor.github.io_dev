@@ -34,6 +34,18 @@ contentratio = 0.7
 readMore = true
 
 displayMode = "light"
+disableThemeSwitcher = true
+
+[[params.socialIcons]]
+icon = "fab fa-github"
+title = "Github"
+url = "https://github.com/fergaljoconnor"
+
+[[params.socialIcons]]
+icon = "fas fa-envelope-square"
+title = "E-Mail"
+url = "mailto:fergaljamesoconnor@gmail.com"
+
 
 [menu]
 
@@ -54,11 +66,3 @@ displayMode = "light"
   weight = 300
   identifier = "about"
   url = "/about/"
-
-  [[menu.main]]
-  name = "Github"
-  identifier = "github"
-  weight = 100
-  url = "https://github.com/fergaljoconnor"
-
-

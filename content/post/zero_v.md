@@ -7,17 +7,16 @@ Categories: []
 DisableComments: false
 ---
 
-# Introduction
-A couple of months ago, I was writing an LC3 virtual machine/ emulator that allows users to add their own plugins to the virtual machine. So a user could write something like:
+A couple of months ago, I was writing an LC3 virtual machine/ emulator that allows users to add their own plugins. So a user could write something like:
 
 ```Rust
-let mut vm= VM::new();
+let mut vm = VM::new();
 vm.add_plugin(command_logger);
 vm.add_plugin(infinite_loop_detector);
 vm.load_program(my_program);
 vm.run()
 ```
-and the vm integrated these plugins in the most obvious way. There was a plugin trait that defined the interface for a plugin:
+And the VM would call the logger and loop detector whenever a command executed. The way the vm integrated these plugins was simple. There was a plugin trait that defined the interface for a plugin:
 
 ```Rust
 pub trait Plugin {
@@ -49,7 +48,9 @@ We are using trait objects, which means dynamic polymorphism, which means to use
 
 And that means vtable overhead.
 
-Most of the time, vtable overhead isn't a big deal. For it to matter you really need to be in a situation where performance is critical, you're counting nanoseconds and you're going to be calling into the vtable a lot. In the case of the VM, performance is important and plugins are called every time the VM sees an event we want to report. Every new command, every memory read or write, every register read or write and every interaction with an IO device will trigger a virtual function call. So we probably have to worry about overhead.
+Most of the time, vtable overhead isn't a big deal. For it to matter you really need to be in a situation where performance is critical, you're counting nanoseconds and you're going to be calling into the vtable a lot. In the case of the VM, performance is important and plugins are called every time the VM sees an event we want to report. Every new command, every memory read or write, every register read or write and every interaction with an IO device will trigger a virtual function call.
+
+So we need to worry about overhead.
 
 This raised the question of whether there was a way for users to inject plugins that:
 1. Avoids virtual function calls.
@@ -75,7 +76,7 @@ That's a bit more straightforward. No VM cruft, no events. Just one integer as i
 
 # Designing a Solution
 
-Now, instead of treating our collection as a homogenous array of trait objects, we want some way to iterate over function outputs without going through any vtables. One way to do this would be to go through an enum. There's actually a crate that does this, [enum_dispatch.](https://crates.io/crates/enum_dispatch) Enum dispatch is great, but it does violate one of our requirements. Lets say a user wants to make their own plugin. Our crate provides an adder they want to use, but they want to add a custom square op. If we use enum_dispatch, then our user has to do something like:
+Instead of treating our collection as a homogenous array of trait objects, we want some way to iterate over function outputs without going through a vtable. One way to do this would be to go through an enum. There's actually a crate that does this, [enum_dispatch.](https://crates.io/crates/enum_dispatch) Enum dispatch is great, but it does violate one of our requirements. Lets say a user wants to make their own plugin. Our crate provides an adder they want to use, but they want to add a custom square op. If we use enum_dispatch, then our user has to do something like:
 
 ```Rust
 #[enum_dispatch(Op)]
@@ -92,21 +93,21 @@ let ops = [
 
 This is okay, but it's still a chunk of boilerplate. This is also slightly inefficient in terms of memory usage. Every member of our collection is going to be as large as the largest variant of the enum pus the size of the enum tag.
 
-Now, on the other hand, enum dispatch lets you vary collection composition at run time and provides a nice interface when you're iterating over the array which is very similar to the way you would iterate over trait objects.
+Now, on the other hand, enum dispatch lets collection composition vary at run time and provides a nice interface when you're iterating over the array which is similar to the way you would iterate over trait objects.
 
 Still, lets see if we can find a solution that deals with memory usage and boiler plate.
 
-So the obvious representation for a memory-efficient, tightly packed collection of heterogenous objects is a struct. But in order to have their trait automatically be implemented for a user-defined struct, the intermediate library author would have to write their own procedural macro, which is a lot of heavy lifting.
+So the obvious representation of a memory-efficient, tightly packed collection of heterogenous objects is a struct. But in order to have their trait automatically be implemented for a user-defined struct, the intermediate library author would have to write their own procedural macro, which is a lot of heavy lifting.
 
 Lets try something different. What are our options instead of a simple struct?
 
-Well, we want to define a type which contains one or more instances of heterogenous objects. And we want to be able to define an iterator over this collection of objects.
+Well, we want to define a collection which contains one or more heterogenous objects. And we want to be able to define an iterator over this collection. This sounds like a job for generics.
 
-This sounds like a job for generics, except for the fact that we won't know how many objects the library user is going to want in their collection in their code, so we don't know how many objects we want to be generic over.
+Except for the fact that we won't know how many objects the library user will want in their collection, so we don't know how many objects to be generic over.
 
 One option for this would be to define one type of struct for every number of elements in the struct. So one struct called OneMemberStruct, one called TwoMemberStruct and so on, with the corresponding number of fields over which the types will be generic:
 
-```Rust
+```rust
 struct OneMemberStruct<A> {
     member1: A
 }
@@ -116,9 +117,9 @@ struct TwoMemberStruct<A, B> {
     member2: B
 }
 ```
-Then we create a trait that defines the behavior of returning an iterator and implement that trait for each struct type. For all likely collection sizes.
+Then we create a trait that defines the behavior of returning an iterator and implement that trait for each struct type. For all collection sizes.
 
-My fingers are starting to hurt just typing that.
+My fingers are starting to hurt just typing that much.
 
 Even with macros, the above solution seems quite ugly. The Rust standard library actually had to do something analogous to this for arrays of different sizes before const generics came along, and while it was workable, it was never ideal. Unfortunately, our collections are heterogenous, so we don't get to use the const generics escape hatch.
 
@@ -130,9 +131,10 @@ struct MyStruct<A, B> {
     next: B
 }
 ```
-If B is another MyStruct, we might have something.It's a little like a linked list. Every node contains some data and the final next pointer will just be a pointer to the next chunk of data. Except that's not how linked lists work, because the final pointer should be a null. So what does a null look like in Rust? It's usually just an Option. But a None in an option is an object that is null and we want to express a type that is null. The closest thing to this is probably the unit type, ().
 
-So lets take another go at defining our struct. We want the next field to either be a MyStruct or the unit type. And lets change the type name to reflect the linked list idea.
+If B is another MyStruct, we might have something. It's a little like a linked list. Every node contains some data and the final next field will just be a pointer to the next chunk of data. Except that's not how linked lists work, because the final pointer should be a null. So what does a null look like in Rust? It's usually just an Option. But a None in an option is an object that is null and we want to express a type that is null. The closest thing to this is probably the unit type, ().
+
+So lets take another go at defining our struct. We know we want the next field to either be a MyStruct or the unit type. And we'll change the type name to reflect the linked list idea.
 
 ```Rust
 struct Node<A, B: NextNode> {
@@ -144,17 +146,17 @@ trait NextNode {}
 impl NextNode for ()
 impl<A, B:NextNode> NextNode for MyStruct<A, B> {}
 ```
-But what does an empty collection look like? We could just use the unit type as the empty collection, but implementing more behavior than we have to for the unit type seems like a bad idea.
+But what does an empty collection look like? We could use the unit type as the empty collection, but implementing more behavior than we have to for the unit type seems like a bad idea.
 
 Instead, lets have a simple type representing the entry point to the collection for the user.
 
 ```Rust
-struct Composite<A:NextNode> {
+struct Composite<A: NextNode> {
     head: A
 }
 ```
 
-Great, we have a type. Lets say we have some constructors defined for everything too (omitted here, the new() functions will look like what you expect) But what does client code look like right now?
+Great, we have a type. Lets imagine we have some constructors defined too (omitted here, the new() functions will most likely look like what you expect) But what does client code look like right now?
 
 ```Rust
 let collection = Composite::new(
@@ -203,7 +205,7 @@ macro_rules! compose {
 }
 ```
 
-And that gives the end-user a pretty nice interface when they're defining their collection:
+And that gives the end-user a pretty interface when they're defining their collection:
 
 ```Rust
 let composite = compose!(
@@ -215,7 +217,7 @@ let composite = compose!(
 
 # Defining Iteration Over This Collection
 
-Great. So we have one problem sorted. But now how does a library writer define the behavior they want over a collection this.
+Great. That's one problem sorted. But now how does a library writer define the behavior they want over a collection.
 
 This is where the tradeoff with the enum solution comes back to bite us. If the collection was composed of enums, you could iterate over it in a pretty standard way, by returning an iterator over &EnumType. All our objects can be of different types, so that's not an option. We could iterate over &dyn TraitType, but then, even though we keep the compact memory representation of the composite solution, we are back to virtual functions and pointer chasing.
 
@@ -246,7 +248,7 @@ impl<'a, Nodes: NextNode> Iterator for CompositeIterator<'a, Nodes> {
 }
 ```
 
-A major problem with this implementation as it stands is that don't have a guarantee that members of the collection implement IntOp. So we'll need a marker trait showing that all the members of a collection implement IntOp.
+A major problem with this implementation as it stands is that there's no guarantee that members of the collection implement IntOp. So we'll need a marker trait that can prove they do.
 
 ```Rust
 trait IntOpCollection {}
@@ -254,7 +256,7 @@ impl<A: IntOp, B: IntOpCollection> IntOpCollection for Node<A, B> {}
 impl IntOpCollection for () {}
 ```
 
-So now we can change the bounds on our CompositeIterator to:
+Now we can change the bounds on our CompositeIterator to:
 
 ```Rust
 struct CompositeIterator<'a, Nodes: NextNode + IntOpCollection> {
@@ -262,7 +264,7 @@ struct CompositeIterator<'a, Nodes: NextNode + IntOpCollection> {
 }
 ```
 
-Now we know our collection contains objects with our trait. How do we iterate over it?
+That means we know our collection contains ony objects implementing our trait. But how do we iterate over it?
 
 Well, our iterator will keep an index that we'll incremement between iterations. So we just need a way to get the output of the run function for the element at that index.
 
@@ -294,7 +296,7 @@ impl IntOpCollection for () {
 
 The real action here happens in the implementation for a Node. If the index has reached zero, we return the result of running the operation at the head of that collection. Otherwise we decrement the index and pass it to the run_at_index method for the subcollection in the next node. Eventually, when the starting index gets big enough, it will reach the unit type at the end of the collection before the index hits zero and return None, which is exactly what we want.
 
-Okay, that gives us the behavior we want. Back to our iterator.
+That gives us the behavior we want. Back to our iterator.
 
 The iterator needs to keep track of the index, hold a reference to the collection and feeds the input arguments to the right element of the collection on each iteration.
 
@@ -315,7 +317,7 @@ impl<'a, Nodes: NextNode> Iterator for CompositeIterator<'a, Nodes> {
 }
 ```
 
-This gives us something like a reverse of the map function on a collection. Map takes a single function and runs it on using each item of the collection as an input. Here we take a single input, and run each function in the collection on it. Well, you could also think of this as using map over a collection of functions where the function passed to map is a closure that calls the function on the single input. Either way, this is only one of the things you might want to do with a collection. What if we wanted to pass the output of one function to the input of the next for an accumulator for example?
+This gives us something like a reverse of the map function on a collection. Map takes a single function and runs it using each item of the collection as an input. Here we take a single input, and run each function in the collection on it. Well, you could also think of this as using map over a collection of functions where the function passed to map is a closure that calls the function on the single input. Either way, this is only one of the things you might want to do with a collection. For example, what if we wanted to pass the output of one function to the input of the next for an accumulator?
 
 This can be done, as long as we can set the value of the input field, by doing something like:
 
