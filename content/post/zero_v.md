@@ -393,3 +393,312 @@ impl<Nodes: NextNode + IntOpAtLevel> IterExecute<Nodes> for Composite<Nodes> {
    }
 }
 ```
+
+# Performance Tuning
+
+The above works, but is it actually giving the expected speedups? After all, if
+it isn't then users are jumping through a series of boilerplate hoops for
+nothing. We need to justify their effort.
+
+Before I get into the becnhmarks, a few quick caveats.
+* Performance varies between different hardware setups. If you care about 
+performance enough to try something like this, please test on your own
+production setup to make sure these figures reflect your experience.
+* I saw some odd behaviour when running these benchmarks. Basically, changing
+the way functions were inlined for the static solution seemed to affect times
+for the dynamic solution while the two should be independent. At first I
+assumed it was due to the laptop throttling the CPU if the static run was fast
+enough, and the dynamic benches after it being hit by the throttling as a
+result. But swapping the order of the benchmarks made no difference, which
+would have been the case if throttling was the issue. For now I'm putting it
+down to either some compiler oddity or something in the benchmark framework
+itself and given the performance I saw, I do believe this solution
+absolutely smokes the dynamic solution in terms of speed.
+
+The benchmarks are divided into four groups, two groups using dynamic calls
+and two using static calls. Within each of these sets, one benchmark uses
+an object with the parameter embedded in the object and one uses a small
+extra tweak where the parameter is baked in at compile time using const
+generics.
+
+Basically, you're looking at something like this in the parameter case:
+
+```rust
+struct Adder {
+    value: usize,
+}
+
+impl Adder {
+    fn new(value: usize) -> Self {
+        Self { value }
+    }
+}
+
+impl IntOp for Adder {
+    fn execute(&self, input: usize) -> usize {
+        input + self.value
+    }
+}
+```
+
+And in the const case, an operation will look like this:
+
+```rust
+struct ConstAdder<const VALUE: usize> {}
+
+impl<const VALUE: usize> ConstAdder<VALUE> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl<const VALUE: usize> IntOp for ConstAdder<VALUE> {
+    fn execute(&self, input: usize) -> usize {
+        input + VALUE
+    }
+}
+```
+
+In addition, there was one baseline benchmark that takes the sledgehammer
+apparoach, by pushing all the operations into a single function with
+no other abstractions. Spoilers, this one crushes both the virtual and static
+benchmarks in terms of performance, and it is not close. If you really need
+the performance, sometimes it pays to be nice to your compiler.
+
+Oh, and the main code for the benchmarks is included in the footnotes[^1]. 
+That's all the legalese taken care of. Onto the results.
+
+![Benchmark Results with No Inlining](/images/violin_no_inline.jpg)
+
+I wasn't joking when I said the baseline crushes the other two methods.
+It beats the parameter-based vtable run by a couple of orders of magnitude,
+clocking in at just over a nanosecond per iteration.
+
+Looking at the static versus dynamic results though, we've got a pretty
+clear victory for the static dispatch benchmarks, clocking in at around 3 times
+as fast as dynamic dispatch, which seems like a pretty clear vindication of the
+effort involved. Assuming you really need those cycles.
+
+So, can we make it any faster?
+
+Sure. I'll save you the results of the benchmarks for the experiments along the
+way (imagine doing the hokey pokey, but with inline function annotations)
+and get straight to the optimizations that worked. Basically, the best run
+involved adding inline annotations to three methods.
+
+```rust
+impl IntOpAtLevel for () {
+    #[inline]
+    fn execute_at_level(&self, _input: usize, _level: usize) -> Option<usize> {
+        None
+    }
+}
+
+impl<A: IntOp, B: NextNode + IntOpAtLevel> IntOpAtLevel for Node<A, B> {
+    #[inline]
+    fn execute_at_level(&self, input: usize, level: usize) -> Option<usize> {
+        if level != 0 {
+            self.next.execute_at_level(input, level - 1)
+        } else {
+            Some(self.data.execute(input))
+        }
+    }
+}
+
+impl<'a, Nodes: NextNode + IntOpAtLevel> Iterator for CompositeIterator<'a, Nodes> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.parent.execute_at_level(self.input, self.level);
+        self.level += 1;
+        result
+    }
+}
+```
+
+Which resulted in the following changes to the benchmarks:
+
+```
+Integer Ops/Static/Arg  time:   [25.491 ns 25.611 ns 25.761 ns]                                    
+                        change: [-19.267% -18.424% -17.520%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+Integer Ops/Vtable/Arg  time:   [109.78 ns 110.13 ns 110.60 ns]                                   
+                        change: [-7.5058% -7.2445% -6.9897%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 13 outliers among 100 measurements (13.00%)
+  7 (7.00%) high mild
+  6 (6.00%) high severe
+Integer Ops/Static/Const                                                                             
+                        time:   [21.950 ns 21.978 ns 22.011 ns]
+                        change: [-37.411% -36.599% -35.701%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+Integer Ops/Vtable/Const                                                                            
+                        time:   [102.87 ns 103.12 ns 103.48 ns]
+                        change: [+12.436% +12.884% +13.492%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 15 outliers among 100 measurements (15.00%)
+  9 (9.00%) high mild
+  6 (6.00%) high severe
+Integer Ops/Baseline    time:   [1.1747 ns 1.1758 ns 1.1771 ns]                                  
+                        change: [-0.3156% -0.0230% +0.3152%] (p = 0.90 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+
+```
+
+So, first off, I want to stress again that something weird is going on here.
+Those vtable benchmarks shouldn't be affected by the changes I made to the
+static benchmarks. However, even with that oddness, it's clear that those
+inline annotations have bought us another 20% in performance for very little
+effort (the set of functions was small enough that I could skip going through
+profiling and head straight to the step where I spend a few minutes dropping
+inline annotations on functions and seeing what the numbers tell me).
+
+# Conclusion
+
+So it looks like we've achieved everything we set out to accomplish. The crate
+is small and simple. It does involve a decent bit of boilerplate on the part of
+the intermediate library author, but once that's in place, their users only 
+ever need to create a collection with the compose macro, which is exactly what
+we had in mind. And our benchmarks confirm we're getting the expected
+performance jump compared to dynamic allocation.
+
+I've [published the code on crates](https://crates.io/crates/zero_v) in case
+anyone finds it useful. Thanks for reading, and feel free to contact me with
+any questions.
+
+[^1]: Benchmarks Code. [Full Source On Github](https://github.com/fergaljoconnor/zero_v/blob/main/benches/integer_ops.rs)
+    ```rust
+    fn bench_composed<NodeType, Composed>(input: usize, composed: &Composed) -> usize
+    where
+        NodeType: IntOpAtLevel + NextNode,
+        Composed: IterIntOps<NodeType>,
+    {
+        composed.iter_execute(input).sum()
+    }
+    
+    fn bench_trait_objects(input: usize, ops: &Vec<Box<dyn IntOp>>) -> usize {
+        ops.iter().map(|op| op.execute(input)).sum()
+    }
+    
+    fn bench_baseline(input: usize) -> usize {
+        (input + 0)
+            + (input << 1)
+            + (input + 2)
+            + (input * 3)
+            + (input + 4)
+            + (input * 5)
+            + (input + 6)
+            + (input * 7)
+            + (input + 8)
+            + (input * 9)
+            + (input + 10)
+            + (input >> 11)
+            + (input + 12)
+            + (input >> 13)
+    }
+    
+    pub fn criterion_benchmark(c: &mut Criterion) {
+        let mut group = c.benchmark_group("Integer Ops");
+    
+        let ops_dyn: Vec<Box<dyn IntOp>> = vec![
+            Box::new(Adder::new(0)),
+            Box::new(LShifter::new(1)),
+            Box::new(Adder::new(2)),
+            Box::new(Multiplier::new(3)),
+            Box::new(Adder::new(4)),
+            Box::new(Multiplier::new(5)),
+            Box::new(Adder::new(6)),
+            Box::new(Multiplier::new(7)),
+            Box::new(Adder::new(8)),
+            Box::new(Multiplier::new(9)),
+            Box::new(Adder::new(10)),
+            Box::new(RShifter::new(11)),
+            Box::new(Adder::new(12)),
+            Box::new(RShifter::new(13)),
+        ];
+    
+        let ops_dyn_const: Vec<Box<dyn IntOp>> = vec![
+            Box::new(ConstAdder::<0>::new()),
+            Box::new(ConstLShifter::<1>::new()),
+            Box::new(ConstAdder::<2>::new()),
+            Box::new(ConstMultiplier::<3>::new()),
+            Box::new(ConstAdder::<4>::new()),
+            Box::new(ConstMultiplier::<5>::new()),
+            Box::new(ConstAdder::<6>::new()),
+            Box::new(ConstMultiplier::<7>::new()),
+            Box::new(ConstAdder::<8>::new()),
+            Box::new(ConstMultiplier::<9>::new()),
+            Box::new(ConstAdder::<10>::new()),
+            Box::new(ConstRShifter::<11>::new()),
+            Box::new(ConstAdder::<12>::new()),
+            Box::new(ConstRShifter::<13>::new()),
+        ];
+    
+        let ops = compose!(
+            Adder::new(0),
+            LShifter::new(1),
+            Adder::new(2),
+            Multiplier::new(3),
+            Adder::new(4),
+            Multiplier::new(5),
+            Adder::new(6),
+            Multiplier::new(7),
+            Adder::new(8),
+            Multiplier::new(9),
+            Adder::new(10),
+            RShifter::new(11),
+            Adder::new(12),
+            RShifter::new(13)
+        );
+    
+        let ops_const = compose!(
+            ConstAdder::<0>::new(),
+            ConstLShifter::<1>::new(),
+            ConstAdder::<2>::new(),
+            ConstMultiplier::<3>::new(),
+            ConstAdder::<4>::new(),
+            ConstMultiplier::<5>::new(),
+            ConstAdder::<6>::new(),
+            ConstMultiplier::<7>::new(),
+            ConstAdder::<8>::new(),
+            ConstMultiplier::<9>::new(),
+            ConstAdder::<10>::new(),
+            ConstRShifter::<11>::new(),
+            ConstAdder::<12>::new(),
+            ConstRShifter::<13>::new()
+        );
+    
+        group.bench_function("Static/Arg", |b| {
+            b.iter(|| bench_composed(black_box(20), black_box(&ops)))
+        });
+    
+        group.bench_function("Vtable/Arg", |b| {
+            b.iter(|| bench_trait_objects(black_box(20), black_box(&ops_dyn)))
+        });
+    
+        group.bench_function("Static/Const", |b| {
+            b.iter(|| bench_composed(black_box(20), black_box(&ops_const)))
+        });
+    
+        group.bench_function("Vtable/Const", |b| {
+            b.iter(|| bench_trait_objects(black_box(20), black_box(&ops_dyn_const)))
+        });
+    
+        group.bench_function("Baseline", |b| {
+            b.iter(|| bench_baseline(black_box(20)))
+        });
+    }
+    
+    criterion_group!(benches, criterion_benchmark);
+    criterion_main!(benches);
+    ```

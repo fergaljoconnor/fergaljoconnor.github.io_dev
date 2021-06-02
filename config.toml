@@ -46,6 +46,12 @@ icon = "fas fa-envelope-square"
 title = "E-Mail"
 url = "mailto:fergaljamesoconnor@gmail.com"
 
+[[params.socialIcons]]
+icon = "fab fa-twitter"
+title = "Twitter"
+url = "https://twitter.com/cachestocrashes"
+
+
 
 [menu]
 
